@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>语音翻译与说话人识别 PWA</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon-192x192.png">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.21.4/babel.min.js"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const App = () => {
+      const [translationDirection, setTranslationDirection] = useState('en2zh');
+      const [isRecording, setIsRecording] = useState(false);
+      const [isEnrolling, setIsEnrolling] = useState(false);
+      const [recognizedText, setRecognizedText] = useState('');
+      const [translatedText, setTranslatedText] = useState('');
+      const [speakerId, setSpeakerId] = useState('Unknown_Speaker');
+      const [profiles, setProfiles] = useState([]);
+      const [status, setStatus] = useState('就绪');
+      const mediaRecorderRef = useRef(null);
+      const audioChunksRef = useRef([]);
+      const streamRef = useRef(null);
+
+      const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1'; // 替换为你的 Azure 密钥
+      const serviceRegion = 'eastus';
+      const endpoint = 'https://eastus.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent/profiles';
+      const speakerProfiles = {
+        'ed1f5481-8b90-4034-81d5-f26ea5db913e': 'Saul Goodman',
+        'aa15bd18-c10a-4181-8567-b80c549d4fd8': 'Chuck McGill',
+        '1ff0d80b-1687-48b1-a329-003a403a74c7': 'Tuco Salamanca',
+      };
+
+      const startRecording = async () => {
+        try {
+          streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaRecorderRef.current = new MediaRecorder(streamRef.current, { mimeType: 'audio/webm' });
+          audioChunksRef.current = [];
+          mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+          mediaRecorderRef.current.onstop = async () => {
+            const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+            if (!isEnrolling) {
+              recognizeAndTranslate(blob);
+            } else {
+              enrollSpeaker(blob);
+            }
+          };
+          mediaRecorderRef.current.start(200);
+          setIsRecording(true);
+          setStatus('正在录音...');
+        } catch (err) {
+          setStatus(`录音错误: ${err.message}`);
+        }
+      };
+
+      const stopRecording = () => {
+        if (mediaRecorderRef.current) {
+          mediaRecorderRef.current.stop();
+          streamRef.current.getTracks().forEach(track => track.stop());
+          setIsRecording(false);
+          setStatus('就绪');
+        }
+      };
+
+      const recognizeAndTranslate = async (audioBlob) => {
+        setStatus('正在识别和翻译...');
+        const formData = new FormData();
+        formData.append('file', audioBlob, 'audio.wav');
+
+        const srcLang = translationDirection === 'en2zh' ? 'en-US' : 'zh-CN';
+        const tgtLang = translationDirection === 'en2zh' ? 'zh-Hans' : 'en';
+        const ttsVoice = translationDirection === 'en2zh' ? 'zh-CN-XiaoxiaoNeural' : 'en-US-JennyNeural';
+
+        try {
+          const sttResponse = await fetch(
+            `https://${serviceRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${srcLang}`,
+            {
+              method: 'POST',
+              headers: { 'Ocp-Apim-Subscription-Key': speechKey, 'Content-Type': 'audio/wav' },
+              body: audioBlob,
+            }
+          );
+          const sttResult = await sttResponse.json();
+          if (sttResult.RecognitionStatus === 'Success') {
+            const text = sttResult.DisplayText;
+            setRecognizedText(text);
+
+            const translateResponse = await fetch(
+              `https://${serviceRegion}.api.cognitive.microsoft.com/sts/v1.0/issuetranslation?api-version=3.0&from=${srcLang.split('-')[0]}&to=${tgtLang}`,
+              {
+                method: 'POST',
+                headers: { 'Ocp-Apim-Subscription-Key': speechKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify([{ Text: text }]),
+              }
+            );
+            const translateResult = await translateResponse.json();
+            const translation = translateResult[0].translations[0].text;
+            setTranslatedText(translation);
+
+            const ttsResponse = await fetch(
+              `https://${serviceRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
+              {
+                method: 'POST',
+                headers: {
+                  'Ocp-Apim-Subscription-Key': speechKey,
+                  'Content-Type': 'application/ssml+xml',
+                  'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+                },
+                body: `<speak version='1.0' xml:lang='${tgtLang}'><voice name='${ttsVoice}'>${translation}</voice></speak>`,
+              }
+            );
+            const ttsBlob = await ttsResponse.blob();
+            const audioUrl = URL.createObjectURL(ttsBlob);
+            new Audio(audioUrl).play();
+
+            const profileIds = Object.keys(speakerProfiles).join(',');
+            const speakerResponse = await fetch(
+              `${endpoint}/identifySingleSpeaker?profileIds=${profileIds}`,
+              {
+                method: 'POST',
+                headers: { 'Ocp-Apim-Subscription-Key': speechKey, 'Content-Type': 'audio/wav' },
+                body: audioBlob,
+              }
+            );
+            const speakerResult = await speakerResponse.json();
+            const identifiedId = speakerResult.identifiedProfile?.profileId || '0';
+            setSpeakerId(speakerProfiles[identifiedId] || 'Unknown_Speaker');
+          } else {
+            setStatus('未识别到语音');
+          }
+        } catch (err) {
+          setStatus(`识别/翻译错误: ${err.message}`);
+        }
+      };
+
+      const createSpeakerProfile = async () => {
+        const locale = translationDirection === 'en2zh' ? 'en-US' : 'zh-CN';
+        try {
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Ocp-Apim-Subscription-Key': speechKey,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ locale }),
+          });
+          const result = await response.json();
+          if (response.status >= 200 && response.status < 300) {
+            setStatus(`创建Profile成功: ${result.profileId}`);
+            listSpeakerProfiles();
+          } else {
+            setStatus(`创建Profile失败: ${response.status}`);
+          }
+        } catch (err) {
+          setStatus(`创建Profile错误: ${err.message}`);
+        }
+      };
+
+      const enrollSpeaker = async (audioBlob) => {
+        setStatus('正在注册说话人...');
+        try {
+          const profileId = profiles[0]?.profileId;
+          if (!profileId) {
+            setStatus('无可用Profile');
+            return;
+          }
+          const response = await fetch(`${endpoint}/${profileId}/enrollments`, {
+            method: 'POST',
+            headers: { 'Ocp-Apim-Subscription-Key': speechKey, 'Content-Type': 'audio/wav' },
+            body: audioBlob,
+          });
+          if (response.status >= 200 && response.status < 300) {
+            setStatus('注册成功');
+            setIsEnrolling(false);
+            listSpeakerProfiles();
+          } else {
+            setStatus(`注册失败: ${response.status}`);
+          }
+        } catch (err) {
+          setStatus(`注册错误: ${err.message}`);
+        }
+      };
+
+      const listSpeakerProfiles = async () => {
+        try {
+          const response = await fetch(endpoint, {
+            headers: { 'Ocp-Apim-Subscription-Key': speechKey },
+          });
+          const result = await response.json();
+          setProfiles(result.profiles || []);
+          setStatus('已更新Profile列表');
+        } catch (err) {
+          setStatus(`获取Profile错误: ${err.message}`);
+        }
+      };
+
+      const deleteSpeakerProfile = async (profileId) => {
+        try {
+          const response = await fetch(`${endpoint}/${profileId}`, {
+            method: 'DELETE',
+            headers: { 'Ocp-Apim-Subscription-Key': speechKey },
+          });
+          if (response.status >= 200 && response.status < 300) {
+            setStatus(`删除Profile ${profileId} 成功`);
+            listSpeakerProfiles();
+          } else {
+            setStatus(`删除Profile失败: ${response.status}`);
+          }
+        } catch (err) {
+          setStatus(`删除Profile错误: ${err.message}`);
+        }
+      };
+
+      useEffect(() => {
+        listSpeakerProfiles();
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.register('/sw.js');
+        }
+      }, []);
+
+      return (
+        <div className="container mx-auto p-4">
+          <h1 className="text-2xl font-bold mb-4">语音翻译与说话人识别 PWA</h1>
+          <div className="mb-4">
+            <label className="block mb-2">翻译方向:</label>
+            <select
+              className="border p-2 rounded"
+              value={translationDirection}
+              onChange={(e) => setTranslationDirection(e.target.value)}
+            >
+              <option value="en2zh">英译中</option>
+              <option value="zh2en">中译英</option>
+            </select>
+          </div>
+          <div className="mb-4">
+            <button
+              className={`p-2 rounded ${isRecording ? 'bg-red-500' : 'bg-green-500'} text-white`}
+              onClick={isRecording ? stopRecording : startRecording}
+            >
+              {isRecording ? '停止录音' : '开始录音'}
+            </button>
+            <button
+              className="p-2 rounded bg-blue-500 text-white ml-2"
+              onClick={() => { setIsEnrolling(true); startRecording(); }}
+            >
+              录制Profile
+            </button>
+            <button
+              className="p-2 rounded bg-purple-500 text-white ml-2"
+              onClick={createSpeakerProfile}
+            >
+              创建Profile
+            </button>
+          </div>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold">状态: {status}</h2>
+            <p>原文: {recognizedText}</p>
+            <p>翻译: {translatedText}</p>
+            <p>说话人: {speakerId}</p>
+          </div>
+          <div>
+            <h2 className="text-xl font-semibold">Profile列表</h2>
+            <ul>
+              {profiles.map(profile => (
+                <li key={profile.profileId} className="border p-2 mb-2">
+                  <p>ID: {profile.profileId}</p>
+                  <p>状态: {profile.enrollmentStatus}</p>
+                  <p>语言: {profile.locale}</p>
+                  <button
+                    className="p-1 bg-red-500 text-white rounded"
+                    onClick={() => deleteSpeakerProfile(profile.profileId)}
+                  >
+                    删除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
