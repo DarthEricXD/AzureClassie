@@ -31,9 +31,13 @@
 
     <script>
         // 配置
-        const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1'; // 替换为你的 Azure 密钥，或通过后端代理
+        const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1'; // 替换为你的 Azure 密钥
         const serviceRegion = 'eastus';
-        const endpoint = `https://${serviceRegion}.api.cognitive.microsoft.com`;
+        const speechEndpoint = `https://${serviceRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
+        const translationEndpoint = `https://${serviceRegion}.api.cognitive.microsoft.com/translate?api-version=3.0`;
+        const speakerEndpoint = `https://${serviceRegion}.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent/profiles`;
+        const ttsEndpoint = `https://${serviceRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
+
         const speakerProfiles = {
             'ed1f5481-8b90-4034-81d5-f26ea5db913e': 'Saul Goodman',
             'aa15bd18-c10a-4181-8567-b80c549d4fd8': 'Chuck McGill',
@@ -182,7 +186,7 @@
             await synthesizeSpeech(translatedText);
             const ttsEnd = performance.now();
 
-            // 输出时延
+            // 输出时延到控制台
             console.log(`ASR时延: ${(asrEnd - asrStart) / 1000}秒`);
             console.log(`翻译时延: ${(translationEnd - asrStart) / 1000}秒`);
             console.log(`TTS时延: ${(ttsEnd - translationEnd) / 1000}秒`);
@@ -230,18 +234,32 @@
 
         // 语音识别
         async function recognizeSpeech(wavBlob) {
-            const formData = new FormData();
-            formData.append('file', wavBlob, 'audio.wav');
             try {
-                const response = await fetch(`${endpoint}/speechtotext/v3.0/transcriptions?language=${config.srcLang}`, {
+                const response = await fetch(`${speechEndpoint}?language=${config.srcLang}&format=detailed`, {
                     method: 'POST',
-                    headers: { 'Ocp-Apim-Subscription-Key': speechKey },
-                    body: formData
+                    headers: {
+                        'Ocp-Apim-Subscription-Key': speechKey,
+                        'Content-Type': 'audio/wav',
+                        'Accept': 'application/json'
+                    },
+                    body: wavBlob
                 });
-                const result = await response.json();
-                return result.recognizedPhrases?.[0]?.nBest?.[0]?.display || '';
+
+                // 调试：输出响应状态和原始内容
+                console.log(`Speech-to-Text 响应状态: ${response.status}`);
+                const responseText = await response.text();
+                console.log(`Speech-to-Text 响应内容: ${responseText}`);
+
+                if (!response.ok) {
+                    updateStatus(`语音识别失败: ${response.status} - ${responseText || '未知错误'}`);
+                    return '';
+                }
+
+                const result = JSON.parse(responseText);
+                return result.DisplayText || '';
             } catch (err) {
                 updateStatus(`语音识别错误: ${err.message}`);
+                console.error('语音识别详细错误:', err);
                 return '';
             }
         }
@@ -249,7 +267,7 @@
         // 翻译
         async function translateText(text) {
             try {
-                const response = await fetch(`${endpoint}/translate?api-version=3.0&from=${config.srcLang}&to=${config.tgtLang}`, {
+                const response = await fetch(`${translationEndpoint}&from=${config.srcLang}&to=${config.tgtLang}`, {
                     method: 'POST',
                     headers: {
                         'Ocp-Apim-Subscription-Key': speechKey,
@@ -257,6 +275,13 @@
                     },
                     body: JSON.stringify([{ Text: text }])
                 });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    updateStatus(`翻译失败: ${response.status} - ${errorText || '未知错误'}`);
+                    return text;
+                }
+
                 const result = await response.json();
                 return result[0]?.translations[0]?.text || text;
             } catch (err) {
@@ -271,11 +296,18 @@
             formData.append('file', wavBlob, 'audio.wav');
             const profileIds = Object.keys(speakerProfiles).join(',');
             try {
-                const response = await fetch(`${endpoint}/speaker/identification/v2.0/text-independent/profiles/identifySingleSpeaker?profileIds=${profileIds}`, {
+                const response = await fetch(`${speakerEndpoint}/identifySingleSpeaker?profileIds=${profileIds}`, {
                     method: 'POST',
                     headers: { 'Ocp-Apim-Subscription-Key': speechKey },
                     body: formData
                 });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    updateStatus(`说话人识别失败: ${response.status} - ${errorText || '未知错误'}`);
+                    return 'Unknown_Speaker';
+                }
+
                 const result = await response.json();
                 return speakerProfiles[result.identifiedProfile?.profileId] || 'Unknown_Speaker';
             } catch (err) {
@@ -287,16 +319,24 @@
         // TTS
         async function synthesizeSpeech(text) {
             try {
-                const response = await fetch(`${endpoint}/texttospeech/v3.0/synthesize`, {
+                const response = await fetch(ttsEndpoint, {
                     method: 'POST',
                     headers: {
                         'Ocp-Apim-Subscription-Key': speechKey,
-                        'Content-Type': 'application/ssml+xml'
+                        'Content-Type': 'application/ssml+xml',
+                        'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3'
                     },
                     body: `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${config.tgtLang}">
                         <voice name="${config.ttsVoice}">${text}</voice>
                     </speak>`
                 });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    updateStatus(`TTS失败: ${response.status} - ${errorText || '未知错误'}`);
+                    return;
+                }
+
                 const audioBlob = await response.blob();
                 const audioUrl = URL.createObjectURL(audioBlob);
                 const audio = new Audio(audioUrl);
