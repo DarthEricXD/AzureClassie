@@ -161,6 +161,13 @@
 
             // 转换为 WAV 格式
             const audioData = new Float32Array(audioChunks.flat());
+            // 确保音频至少4秒
+            const minSamples = 4 * 16000; // 4秒 @ 16000Hz
+            if (audioData.length < minSamples) {
+                const padded = new Float32Array(minSamples);
+                padded.set(audioData);
+                audioData = padded;
+            }
             const wavBlob = await floatToWav(audioData, audioContext.sampleRate);
             audioChunks = [];
 
@@ -214,7 +221,7 @@
             writeString(view, 8, 'WAVE');
             writeString(view, 12, 'fmt ');
             view.setUint32(16, 16, true);
-            view.setUint16(20, 1, true);
+            view.setUint16(20, 1, true); // 单声道
             view.setUint16(22, numChannels, true);
             view.setUint32(24, sampleRate, true);
             view.setUint32(28, byteRate, true);
@@ -225,7 +232,7 @@
 
             // 写入 PCM 数据
             for (let i = 0; i < audioData.length; i++) {
-                const sample = Math.max(-1, Math.min(1, audioData[i])) * 0x7FFF;
+                const sample = Math.max(-1, Math.min(1, audioData[i] || 0)) * 0x7FFF;
                 view.setInt16(44 + i * 2, sample, true);
             }
 
@@ -235,7 +242,7 @@
         // 语音识别
         async function recognizeSpeech(wavBlob) {
             try {
-                const response = await fetch(`${speechEndpoint}?language=${config.srcLang}&format=detailed`, {
+                const response = await fetch(`${speechEndpoint}?language=${config.srcLang}`, {
                     method: 'POST',
                     headers: {
                         'Ocp-Apim-Subscription-Key': speechKey,
@@ -245,17 +252,27 @@
                     body: wavBlob
                 });
 
-                // 调试：输出响应状态和原始内容
+                // 调试：输出响应状态和内容
                 console.log(`Speech-to-Text 响应状态: ${response.status}`);
                 const responseText = await response.text();
                 console.log(`Speech-to-Text 响应内容: ${responseText}`);
 
                 if (!response.ok) {
-                    updateStatus(`语音识别失败: ${response.status} - ${responseText || '未知错误'}`);
+                    updateStatus(`语音识别失败: HTTP ${response.status} - ${responseText || '未知错误'}`);
+                    return '';
+                }
+
+                if (!responseText) {
+                    updateStatus('语音识别失败: 响应为空');
                     return '';
                 }
 
                 const result = JSON.parse(responseText);
+                if (result.RecognitionStatus !== 'Success') {
+                    updateStatus(`语音识别失败: ${result.RecognitionStatus || '未知状态'}`);
+                    return '';
+                }
+
                 return result.DisplayText || '';
             } catch (err) {
                 updateStatus(`语音识别错误: ${err.message}`);
