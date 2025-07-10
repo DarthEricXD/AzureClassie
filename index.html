@@ -31,7 +31,7 @@
 
     <script>
         // 配置
-        const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1'; // 替换为你的 Azure 密钥
+        const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1';
         const serviceRegion = 'eastus';
         const speechEndpoint = `https://${serviceRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
         const translationEndpoint = `https://${serviceRegion}.api.cognitive.microsoft.com/translate?api-version=3.0`;
@@ -47,8 +47,10 @@
         let audioContext, source, processor, stream;
         let isRecording = false;
         let audioChunks = [];
-        let lastProcessedTime = 0;
+        let silenceStart = null;
         let config = {};
+        const SILENCE_THRESHOLD = 0.01; // 振幅阈值
+        const SILENCE_DURATION = 200; // 静音检测 200ms
 
         // 初始化界面元素
         const startBtn = document.getElementById('startBtn');
@@ -107,10 +109,7 @@
                             const input = inputs[0][0];
                             if (input) {
                                 this.buffer.push(...input);
-                                if (this.buffer.length >= 32000) { // 2秒数据
-                                    this.port.postMessage(new Float32Array(this.buffer));
-                                    this.buffer = [];
-                                }
+                                this.port.postMessage(new Float32Array(input)); // 实时发送小块数据
                             }
                             return true;
                         }
@@ -123,9 +122,17 @@
                     if (!isRecording) return;
                     const audioData = e.data;
                     audioChunks.push(audioData);
-                    if (Date.now() - lastProcessedTime >= 4000) { // 每4秒处理
-                        await processAudio();
-                        lastProcessedTime = Date.now();
+
+                    // 静音检测
+                    const maxAmplitude = Math.max(...audioData.map(Math.abs));
+                    if (maxAmplitude < SILENCE_THRESHOLD) {
+                        if (!silenceStart) silenceStart = Date.now();
+                        if (Date.now() - silenceStart >= SILENCE_DURATION && audioChunks.length > 0) {
+                            await processAudio();
+                            silenceStart = null;
+                        }
+                    } else {
+                        silenceStart = null;
                     }
                 };
                 source.connect(processor);
@@ -152,6 +159,7 @@
             stopBtn.disabled = true;
             updateStatus('已停止');
             audioChunks = [];
+            silenceStart = null;
             updateResults('未识别', '无', '无');
         }
 
@@ -161,6 +169,14 @@
 
             // 转换为 WAV 格式
             let audioData = new Float32Array(audioChunks.flat());
+            // 检查音频振幅
+            const maxAmplitude = Math.max(...audioData.map(Math.abs));
+            if (maxAmplitude < SILENCE_THRESHOLD) {
+                updateStatus('未检测到有效语音，请大声清晰说话');
+                audioChunks = [];
+                return;
+            }
+
             // 确保音频至少4秒
             const minSamples = 4 * 16000; // 4秒 @ 16000Hz
             if (audioData.length < minSamples) {
@@ -171,10 +187,17 @@
             const wavBlob = await floatToWav(audioData, audioContext.sampleRate);
             audioChunks = [];
 
+            // 调试：保存 WAV 文件
+            const wavUrl = URL.createObjectURL(wavBlob);
+            console.log('WAV 文件:', wavUrl);
+
             // 语音识别
             const asrStart = performance.now();
             const text = await recognizeSpeech(wavBlob);
-            if (!text) return;
+            if (!text) {
+                updateStatus('未检测到语音内容');
+                return;
+            }
             const asrEnd = performance.now();
 
             // 翻译
@@ -221,7 +244,7 @@
             writeString(view, 8, 'WAVE');
             writeString(view, 12, 'fmt ');
             view.setUint32(16, 16, true);
-            view.setUint16(20, 1, true); // 单声道
+            view.setUint16(20, 1, true);
             view.setUint16(22, numChannels, true);
             view.setUint32(24, sampleRate, true);
             view.setUint32(28, byteRate, true);
@@ -273,7 +296,12 @@
                     return '';
                 }
 
-                return result.DisplayText || '';
+                if (!result.DisplayText) {
+                    updateStatus('未检测到语音内容，请大声说话');
+                    return '';
+                }
+
+                return result.DisplayText;
             } catch (err) {
                 updateStatus(`语音识别错误: ${err.message}`);
                 console.error('语音识别详细错误:', err);
