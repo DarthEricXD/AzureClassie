@@ -26,10 +26,12 @@
       const mediaRecorderRef = useRef(null);
       const audioChunksRef = useRef([]);
       const streamRef = useRef(null);
+      const isProcessingRef = useRef(false);
 
       const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1';
       const serviceRegion = 'eastus';
-      const endpoint = 'https://eastus.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent/profiles';
+      const translateEndpoint = 'https://api.cognitive.microsofttranslator.com/translate?api-version=3.0';
+      const speakerEndpoint = 'https://eastus.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent/profiles';
       const speakerProfiles = {
         'ed1f5481-8b90-4034-81d5-f26ea5db913e': 'Saul Goodman',
         'aa15bd18-c10a-4181-8567-b80c549d4fd8': 'Chuck McGill',
@@ -41,14 +43,15 @@
           streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
           mediaRecorderRef.current = new MediaRecorder(streamRef.current, { mimeType: 'audio/webm' });
           audioChunksRef.current = [];
-          mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
-          mediaRecorderRef.current.onstop = async () => {
-            const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-            recognizeAndTranslate(blob);
+          mediaRecorderRef.current.ondataavailable = (e) => {
+            audioChunksRef.current.push(e.data);
+            if (!isProcessingRef.current) {
+              processAudioChunk();
+            }
           };
-          mediaRecorderRef.current.start(200); // 每200ms分段
+          mediaRecorderRef.current.start(4000); // 每4秒生成一个音频片段
           setIsRecording(true);
-          setStatus('正在录音...');
+          setStatus('正在录音并实时翻译...');
         } catch (err) {
           setStatus(`录音失败：${err.message}（请检查麦克风权限）`);
         }
@@ -59,17 +62,26 @@
           mediaRecorderRef.current.stop();
           streamRef.current.getTracks().forEach(track => track.stop());
           setIsRecording(false);
-          setStatus('录音已停止，请等待处理结果');
+          setStatus('录音已停止');
         }
       };
 
+      const processAudioChunk = async () => {
+        if (audioChunksRef.current.length === 0) return;
+        isProcessingRef.current = true;
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        audioChunksRef.current = []; // 清空缓冲区
+        await recognizeAndTranslate(blob);
+        isProcessingRef.current = false;
+      };
+
       const recognizeAndTranslate = async (audioBlob) => {
-        setStatus('正在处理语音...');
+        setStatus('正在处理音频片段...');
         const formData = new FormData();
-        formData.append('file', audioBlob, 'audio.wav');
+        formData.append('file', audioListener, 'audio.wav');
 
         const srcLang = translationDirection === 'en2zh' ? 'en-US' : 'zh-CN';
-        const tgtLang = translationDirection === 'en2zh' ? 'zh-Hans' : 'en';
+        const tgtLang Lin translationDirection === 'en2zh' ? 'zh-Hans' : 'en';
         const ttsVoice = translationDirection === 'en2zh' ? 'zh-CN-XiaoxiaoNeural' : 'en-US-JennyNeural';
 
         try {
@@ -95,7 +107,7 @@
 
           // 翻译
           const translateResponse = await fetch(
-            `https://${serviceRegion}.api.cognitive.microsoft.com/sts/v1.0/issuetranslation?api-version=3.0&from=${srcLang.split('-')[0]}&to=${tgtLang}`,
+            `${translateEndpoint}&from=${srcLang.split('-')[0]}&to=${tgtLang}`,
             {
               method: 'POST',
               headers: {
@@ -139,7 +151,7 @@
           // 说话人识别
           const profileIds = Object.keys(speakerProfiles).join(',');
           const speakerResponse = await fetch(
-            `${endpoint}/identifySingleSpeaker?profileIds=${profileIds}`,
+            `${speakerEndpoint}/identifySingleSpeaker?profileIds=${profileIds}`,
             {
               method: 'POST',
               headers: { 'Ocp-Apim-Subscription-Key': speechKey, 'Content-Type': 'audio/wav' },
@@ -153,15 +165,13 @@
           const speakerResult = await speakerResponse.json();
           const identifiedId = speakerResult.identifiedProfile?.profileId || '0';
           setSpeakerId(speakerProfiles[identifiedId] || 'Unknown_Speaker');
-          setStatus('处理完成');
+          setStatus('处理完成，继续录音...');
         } catch (err) {
           setStatus(`错误：${err.message}`);
         }
       };
 
-      // 文本转换函数
       const textTransform = (text) => {
-        // 移除中文标点（句号、逗号等），替换为英文标点
         return text.replace(/。/g, '. ').replace(/，/g, ', ').replace(/？/g, '? ').replace(/！/g, '! ').trim();
       };
 
@@ -196,7 +206,7 @@
             </button>
           </div>
           <div className="bg-white shadow-md rounded-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">结果</h2>
+            <h2 className="text-xl font-semibold mb-4">实时结果</h2>
             <p className="mb-2"><span className="font-medium">状态：</span> {status}</p>
             <p className="mb-2"><span className="font-medium">原文：</span> {recognizedText || '无'}</p>
             <p className="mb-2"><span className="font-medium">翻译：</span> {translatedText || '无'}</p>
