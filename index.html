@@ -21,12 +21,17 @@
             <button id="stopBtn" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" disabled>停止</button>
         </div>
         <div id="status" class="mt-4 text-sm text-gray-600"></div>
-        <div id="output" class="mt-4 p-4 bg-gray-50 rounded max-h-64 overflow-y-auto"></div>
+        <div class="mt-4">
+            <h2 class="text-lg font-semibold">结果</h2>
+            <div id="speaker" class="p-2 bg-gray-50 rounded mb-2">说话人: 未识别</div>
+            <div id="original" class="p-2 bg-gray-50 rounded mb-2">原文: 无</div>
+            <div id="translation" class="p-2 bg-gray-50 rounded">翻译: 无</div>
+        </div>
     </div>
 
     <script>
         // 配置
-        const speechKey = 'BU3QOxz2wwkbeO658aTcGBzoJEIsuJM45i0T7aMedBrz3Bb8Q0iiJQQJ99BFACYeBjFXJ3w3AAAYACOGFbq1';
+        const speechKey = 'YOUR_AZURE_SUBSCRIPTION_KEY'; // 替换为你的 Azure 密钥，或通过后端代理
         const serviceRegion = 'eastus';
         const endpoint = `https://${serviceRegion}.api.cognitive.microsoft.com`;
         const speakerProfiles = {
@@ -45,7 +50,9 @@
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
         const status = document.getElementById('status');
-        const output = document.getElementById('output');
+        const speaker = document.getElementById('speaker');
+        const original = document.getElementById('original');
+        const translation = document.getElementById('translation');
         const translationDirection = document.getElementById('translationDirection');
 
         // 更新配置
@@ -69,12 +76,11 @@
             status.textContent = message;
         }
 
-        // 添加输出
-        function addOutput(message) {
-            const div = document.createElement('div');
-            div.textContent = message;
-            output.appendChild(div);
-            output.scrollTop = output.scrollHeight;
+        // 更新结果
+        function updateResults(speakerText, originalText, translationText) {
+            speaker.textContent = `说话人: ${speakerText}`;
+            original.textContent = `原文: ${originalText}`;
+            translation.textContent = `翻译: ${translationText}`;
         }
 
         // 开始录音
@@ -86,7 +92,7 @@
                 audioContext = new AudioContext({ sampleRate: 16000 });
                 source = audioContext.createMediaStreamSource(stream);
 
-                // 创建 AudioWorklet 或 ScriptProcessor 捕获音频
+                // 创建 AudioWorklet 捕获音频
                 await audioContext.audioWorklet.addModule(URL.createObjectURL(new Blob([`
                     class AudioProcessor extends AudioWorkletProcessor {
                         constructor() {
@@ -142,9 +148,10 @@
             stopBtn.disabled = true;
             updateStatus('已停止');
             audioChunks = [];
+            updateResults('未识别', '无', '无');
         }
 
-        // 处理音频（语音识别、翻译、说话人识别、TTS）
+        // 处理音频
         async function processAudio() {
             if (!audioChunks.length) return;
 
@@ -157,29 +164,28 @@
             const asrStart = performance.now();
             const text = await recognizeSpeech(wavBlob);
             if (!text) return;
-
             const asrEnd = performance.now();
-            addOutput(`原文: ${text}`);
 
             // 翻译
             const translationStart = performance.now();
-            const translation = await translateText(text);
+            const translatedText = await translateText(text);
             const translationEnd = performance.now();
-            addOutput(`翻译: ${translation}`);
 
             // 说话人识别
-            const speaker = await identifySpeaker(wavBlob);
-            addOutput(`说话人: ${speaker}`);
+            const speakerId = await identifySpeaker(wavBlob);
+
+            // 更新界面
+            updateResults(speakerId, text, translatedText);
 
             // TTS
             const ttsStart = performance.now();
-            await synthesizeSpeech(translation);
+            await synthesizeSpeech(translatedText);
             const ttsEnd = performance.now();
 
             // 输出时延
-            addOutput(`ASR时延: ${(asrEnd - asrStart) / 1000}秒`);
-            addOutput(`翻译时延: ${(translationEnd - asrStart) / 1000}秒`);
-            addOutput(`TTS时延: ${(ttsEnd - translationEnd) / 1000}秒`);
+            console.log(`ASR时延: ${(asrEnd - asrStart) / 1000}秒`);
+            console.log(`翻译时延: ${(translationEnd - asrStart) / 1000}秒`);
+            console.log(`TTS时延: ${(ttsEnd - translationEnd) / 1000}秒`);
         }
 
         // Float32Array 转 WAV
@@ -227,7 +233,7 @@
             const formData = new FormData();
             formData.append('file', wavBlob, 'audio.wav');
             try {
-                const response = await fetch(`${endpoint}/speechtotext/v3.0/transcriptions`, {
+                const response = await fetch(`${endpoint}/speechtotext/v3.0/transcriptions?language=${config.srcLang}`, {
                     method: 'POST',
                     headers: { 'Ocp-Apim-Subscription-Key': speechKey },
                     body: formData
@@ -235,24 +241,28 @@
                 const result = await response.json();
                 return result.recognizedPhrases?.[0]?.nBest?.[0]?.display || '';
             } catch (err) {
-                addOutput(`语音识别错误: ${err.message}`);
+                updateStatus(`语音识别错误: ${err.message}`);
                 return '';
             }
         }
 
         // 翻译
         async function translateText(text) {
-            const response = await fetch(`${endpoint}/translate?api-version=3.0&from=${config.srcLang}&to=${config.tgtLang}`, {
-                method: 'POST',
-                headers: {
-                    'Ocp-Apim-Subscription-Key': speechKey,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify([{ Text: text }])
-"'` "']})
-            });
-            const result = await response.json();
-            return result[0]?.translations[0]?.text || text;
+            try {
+                const response = await fetch(`${endpoint}/translate?api-version=3.0&from=${config.srcLang}&to=${config.tgtLang}`, {
+                    method: 'POST',
+                    headers: {
+                        'Ocp-Apim-Subscription-Key': speechKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify([{ Text: text }])
+                });
+                const result = await response.json();
+                return result[0]?.translations[0]?.text || text;
+            } catch (err) {
+                updateStatus(`翻译错误: ${err.message}`);
+                return text;
+            }
         }
 
         // 说话人识别
@@ -269,7 +279,7 @@
                 const result = await response.json();
                 return speakerProfiles[result.identifiedProfile?.profileId] || 'Unknown_Speaker';
             } catch (err) {
-                addOutput(`说话人识别错误: ${err.message}`);
+                updateStatus(`说话人识别错误: ${err.message}`);
                 return 'Unknown_Speaker';
             }
         }
@@ -292,7 +302,7 @@
                 const audio = new Audio(audioUrl);
                 audio.play();
             } catch (err) {
-                addOutput(`TTS错误: ${err.message}`);
+                updateStatus(`TTS错误: ${err.message}`);
             }
         }
 
