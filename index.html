@@ -160,7 +160,7 @@
             if (!audioChunks.length) return;
 
             // 转换为 WAV 格式
-            const audioData = new Float32Array(audioChunks.flat());
+            let audioData = new Float32Array(audioChunks.flat());
             // 确保音频至少4秒
             const minSamples = 4 * 16000; // 4秒 @ 16000Hz
             if (audioData.length < minSamples) {
